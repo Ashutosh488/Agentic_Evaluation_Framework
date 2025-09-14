@@ -1,5 +1,8 @@
-streamlit
+ollama
 pandas
 matplotlib
 seaborn
-openai
+ipywidgets
+ipython
+fastapi
+uvicorn
