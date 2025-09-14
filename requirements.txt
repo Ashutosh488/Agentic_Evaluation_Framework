@@ -1,6 +1,5 @@
-ollama
+streamlit
 pandas
+requests
 matplotlib
 seaborn
-ipywidgets
-ipython
