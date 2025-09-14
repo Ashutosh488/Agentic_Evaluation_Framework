@@ -1,0 +1,6 @@
+ollama
+pandas
+matplotlib
+seaborn
+ipywidgets
+ipython
