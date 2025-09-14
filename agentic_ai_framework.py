@@ -39,19 +39,19 @@ if not hf_api_key:
     st.stop()
 
 # --- CORE FUNCTIONS (LLM Logic with Hugging Face API) ---
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner="Connecting to Hugging Face model...")
 def query_hf_model(api_url: str, payload: dict, api_key: str) -> str:
     """Sends a request to a Hugging Face model and returns the text response."""
     headers = {"Authorization": f"Bearer {api_key}"}
     try:
         response = requests.post(api_url, headers=headers, json=payload)
-        
+
         if response.status_code == 503: # Model is loading
             st.toast("Model is loading, please wait...")
             time.sleep(15)
             response = requests.post(api_url, headers=headers, json=payload)
 
-        response.raise_for_status()
+        response.raise_for_status() # Raises an HTTPError for bad responses (4xx or 5xx)
 
         result = response.json()
         generated_text = result[0].get('generated_text', '')
@@ -62,16 +62,13 @@ def query_hf_model(api_url: str, payload: dict, api_key: str) -> str:
         return generated_text.strip()
 
     except requests.exceptions.RequestException as e:
-        # This will be printed in the terminal if the key is wrong or network fails
-        print(f"API Request Error: {e}")
-        # Return an error string that will cause a downstream failure
-        return f"ERROR_API_REQUEST: {e}"
+        # IMPROVEMENT: Raise an exception to be caught by the UI, instead of printing.
+        raise ConnectionError(f"API Request Failed: {e}")
     except (KeyError, IndexError, json.JSONDecodeError) as e:
-        print(f"Error parsing model response: {e}")
-        return f"ERROR_PARSING: {response.text}"
+        raise ValueError(f"Failed to parse model response: {response.text}")
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner="The AI Judge is evaluating...")
 def evaluate_response_in_one_shot(prompt: str, response: str, metadata: str) -> dict:
     """Evaluates a response using the Judge model, returning a structured dictionary."""
     if not metadata: metadata = "No metadata provided."
@@ -89,16 +86,16 @@ def evaluate_response_in_one_shot(prompt: str, response: str, metadata: str) -> 
 
     payload = {
         "inputs": full_prompt,
-        "parameters": {"max_new_tokens": 512, "temperature": 0.1}
+        "parameters": {"max_new_tokens": 512, "temperature": 0.1, "return_full_text": False}
     }
 
-    raw_output = query_hf_model(JUDGE_API_URL, payload, hf_api_key)
-
     try:
+        raw_output = query_hf_model(JUDGE_API_URL, payload, hf_api_key)
+        # LLMs sometimes wrap their JSON output in markdown backticks, so we clean it.
         clean_json_str = raw_output.strip().removeprefix('```json').removesuffix('```')
         return json.loads(clean_json_str)
-    except json.JSONDecodeError:
-        return {key: {"score": -1, "justification": f"Failed to parse LLM's JSON output. Raw: {raw_output}"} for key in ["instruction_following", "coherence", "assumption_control", "hallucination_score"]}
+    except (json.JSONDecodeError, ConnectionError, ValueError) as e:
+        return {key: {"score": -1, "justification": f"Evaluation failed. Error: {e}"} for key in ["instruction_following", "coherence", "assumption_control", "hallucination_score"]}
 
 # --- UI HELPER FUNCTIONS ---
 def display_evaluation_report(results_dict: dict):
@@ -124,8 +121,14 @@ def display_evaluation_report(results_dict: dict):
             justification = value.get('justification', 'N/A')
 
             st.markdown(f"**{title}**")
-            st.metric(label="Score", value=f"{score} / 10", label_visibility="collapsed")
-            st.progress(score * 10)
+            # Using a custom color based on score
+            if score >= 8:
+                color = "blue"
+            elif score >= 5:
+                color = "orange"
+            else:
+                color = "red"
+            st.markdown(f'<div style="width: 100%; background-color: #eee; border-radius: 5px;"><div style="width: {score*10}%; background-color: {color}; color: white; text-align: center; border-radius: 5px;">{score}/10</div></div>', unsafe_allow_html=True)
             with st.expander("See Justification"):
                 st.info(f"_{justification}_")
         col_idx += 1
@@ -140,15 +143,14 @@ with tab1:
     st.header("Live Evaluation")
     col1, col2 = st.columns(2, gap="large")
     with col1:
-        prompt_input = st.text_area("1. User Prompt", height=150)
-        response_input = st.text_area("2. Agent's Response", height=200)
-        metadata_input = st.text_area("3. Metadata (Optional JSON)", height=100)
+        prompt_input = st.text_area("1. User Prompt", height=150, key="live_prompt")
+        response_input = st.text_area("2. Agent's Response", height=200, key="live_response")
+        metadata_input = st.text_area("3. Metadata (Optional JSON)", height=100, key="live_metadata")
         if st.button("Evaluate Now ✨", type="primary", use_container_width=True):
             if not prompt_input or not response_input:
                 st.error("Please provide both a prompt and a response.")
             else:
-                with st.spinner("🤖 The Judge is evaluating..."):
-                    st.session_state.evaluation_results = evaluate_response_in_one_shot(prompt_input, response_input, metadata_input)
+                st.session_state.evaluation_results = evaluate_response_in_one_shot(prompt_input, response_input, metadata_input)
     with col2:
         if 'evaluation_results' in st.session_state:
             display_evaluation_report(st.session_state.evaluation_results)
@@ -158,6 +160,7 @@ with tab2:
     with st.expander("Step 1: Generate Synthetic Data", expanded=True):
         num_samples = st.slider("Number of prompt/response pairs to generate", 1, 10, 2)
         if st.button("Generate Data 📝", use_container_width=True):
+            st.toast("Starting data generation... this may take a moment.")
             all_data = []
             progress_bar = st.progress(0, text="Generating data...")
             topics = ["Renewable Energy", "Ancient Rome", "Machine Learning Concepts"]
@@ -166,13 +169,13 @@ with tab2:
                 system_prompt = "You are a synthetic data generator. Your output MUST be a single, valid JSON object and nothing else."
                 user_prompt = f"Create a user prompt, metadata, a high-quality 'Agent A' response, and a low-quality 'Agent B' response on the topic of **{topic}**. The JSON must have these keys: 'metadata', 'prompt', 'agent_a_response', 'agent_b_response'."
                 generator_prompt = f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{system_prompt}<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n{user_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n"
-                payload = {"inputs": generator_prompt, "parameters": {"max_new_tokens": 1024}}
-                raw_output = query_hf_model(GENERATOR_API_URL, payload, hf_api_key)
+                payload = {"inputs": generator_prompt, "parameters": {"max_new_tokens": 1024, "return_full_text": False}}
                 try:
+                    raw_output = query_hf_model(GENERATOR_API_URL, payload, hf_api_key)
                     data_point = json.loads(raw_output)
                     all_data.append({'agent_id': 'Agent-A', 'prompt': data_point.get('prompt'), 'metadata': json.dumps(data_point.get('metadata')), 'agent_response': data_point.get('agent_a_response')})
                     all_data.append({'agent_id': 'Agent-B', 'prompt': data_point.get('prompt'), 'metadata': json.dumps(data_point.get('metadata')), 'agent_response': data_point.get('agent_b_response')})
-                except (json.JSONDecodeError, AttributeError) as e:
+                except (json.JSONDecodeError, AttributeError, ConnectionError, ValueError) as e:
                     st.warning(f"Skipped a data point due to a generation/parsing error: {e}")
                 progress_bar.progress((i + 1) / num_samples, f"Generated pair {i+1}/{num_samples}")
             st.session_state.generated_df = pd.DataFrame(all_data)
@@ -186,7 +189,7 @@ with tab2:
     st.subheader("Step 2: Run Evaluation and Visualize Results")
     if 'generated_df' in st.session_state and not st.session_state.generated_df.empty:
         if st.button("Run Full Analysis 📊", type="primary", use_container_width=True):
-            with st.spinner("Running batch evaluation..."):
+            with st.spinner("Running batch evaluation... This can take several minutes."):
                 df = st.session_state.generated_df
                 results = []
                 progress_bar = st.progress(0, text="Evaluating responses...")
@@ -194,17 +197,41 @@ with tab2:
                     result_dict = evaluate_response_in_one_shot(row.get('prompt'), row.get('agent_response'), row.get('metadata'))
                     results.append(result_dict)
                     progress_bar.progress((index + 1) / len(df), f"Evaluating response {index+1}/{len(df)}")
+                
                 results_df = pd.json_normalize(results, sep='_')
                 evaluated_df = pd.concat([df.reset_index(drop=True), results_df.reset_index(drop=True)], axis=1)
+                
+                # IMPROVEMENT: Simplified score calculation.
                 score_cols = [col for col in evaluated_df.columns if col.endswith('_score')]
                 for col in score_cols:
-                    evaluated_df[f'{col}_int'] = pd.to_numeric(evaluated_df[col], errors='coerce').fillna(0)
-                int_score_cols = [col for col in evaluated_df.columns if '_int' in col]
-                evaluated_df['average_score'] = evaluated_df[int_score_cols].mean(axis=1)
+                    # Coerce errors will turn non-numeric values (like None) into NaN, which we fill with 0
+                    evaluated_df[col] = pd.to_numeric(evaluated_df[col], errors='coerce').fillna(0)
+                
+                evaluated_df['average_score'] = evaluated_df[score_cols].mean(axis=1)
                 st.session_state.analyzed_df = evaluated_df
             st.success("✅ Batch analysis complete!")
 
     if 'analyzed_df' in st.session_state:
         st.subheader("Analysis Results")
         analyzed_df = st.session_state.analyzed_df
-        # Visualization logic...
+        
+        # --- Leaderboard Visualization ---
+        st.markdown("#### 🏆 Agent Performance Leaderboard")
+        leaderboard = analyzed_df.groupby('agent_id')['average_score'].mean().sort_values(ascending=False).reset_index()
+        fig1, ax1 = plt.subplots(figsize=(10, 4))
+        sns.barplot(data=leaderboard, x='average_score', y='agent_id', palette='viridis', hue='agent_id', ax=ax1, dodge=False)
+        ax1.set_title('Overall Agent Performance')
+        ax1.set_xlabel('Average Score (out of 10)')
+        ax1.set_ylabel('Agent ID')
+        ax1.set_xlim(0, 10)
+        st.pyplot(fig1)
+
+        # --- Heatmap Visualization ---
+        st.markdown("#### 🔥 Strengths & Weaknesses Heatmap")
+        score_cols = [col for col in analyzed_df.columns if col.endswith('_score') and 'average' not in col]
+        heatmap_data = analyzed_df.groupby('agent_id')[score_cols].mean()
+        heatmap_data.columns = [col.replace('_score', '').replace('_', ' ').title() for col in heatmap_data.columns]
+        fig2, ax2 = plt.subplots(figsize=(10, 4))
+        sns.heatmap(heatmap_data, annot=True, cmap="YlGnBu", fmt=".2f", linewidths=.5, ax=ax2)
+        ax2.set_title('Average Scores by Dimension')
+        st.pyplot(fig2)
