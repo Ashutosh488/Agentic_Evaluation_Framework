@@ -21,7 +21,9 @@ st.set_page_config(
 
 # --- MODEL & APP CONSTANTS ---
 GENERATOR_API_URL = "https://api-inference.huggingface.co/models/meta-llama/Meta-Llama-3-8B-Instruct"
-JUDGE_API_URL = "https://api-inference.huggingface.co/models/microsoft/Phi-3-mini-4k-instruct"
+# FIX: Switched to the 128k variant of Phi-3, which is available on the free Inference API.
+JUDGE_API_URL = "https://api-inference.huggingface.co/models/microsoft/Phi-3-mini-128k-instruct"
+
 
 # --- SIDEBAR FOR API KEY ---
 st.sidebar.title("Configuration")
@@ -62,7 +64,6 @@ def query_hf_model(api_url: str, payload: dict, api_key: str) -> str:
         return generated_text.strip()
 
     except requests.exceptions.RequestException as e:
-        # IMPROVEMENT: Raise an exception to be caught by the UI, instead of printing.
         raise ConnectionError(f"API Request Failed: {e}")
     except (KeyError, IndexError, json.JSONDecodeError) as e:
         raise ValueError(f"Failed to parse model response: {response.text}")
@@ -201,10 +202,8 @@ with tab2:
                 results_df = pd.json_normalize(results, sep='_')
                 evaluated_df = pd.concat([df.reset_index(drop=True), results_df.reset_index(drop=True)], axis=1)
                 
-                # IMPROVEMENT: Simplified score calculation.
                 score_cols = [col for col in evaluated_df.columns if col.endswith('_score')]
                 for col in score_cols:
-                    # Coerce errors will turn non-numeric values (like None) into NaN, which we fill with 0
                     evaluated_df[col] = pd.to_numeric(evaluated_df[col], errors='coerce').fillna(0)
                 
                 evaluated_df['average_score'] = evaluated_df[score_cols].mean(axis=1)
